@@ -21,6 +21,7 @@ def settings(repository_root: Path) -> Settings:
     return Settings(
         database_url=f"sqlite:///{repository_root / 'devpilot-test.db'}",
         allowed_repository_root=repository_root,
+        workspace_storage_root=repository_root.parent / f"{repository_root.name}-workspaces",
         enable_local_execution=False,
     )
 

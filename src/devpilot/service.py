@@ -13,6 +13,7 @@ from devpilot.config import Settings
 from devpilot.domain import EventKind, TaskStatus
 from devpilot.errors import InvalidTaskStateError, LeaseLostError, RetryableStepError
 from devpilot.indexing import RepositoryIndexer
+from devpilot.patching import WorkspaceManager
 from devpilot.providers import DeterministicProvider
 from devpilot.queue import JobQueue
 from devpilot.repository import TaskRepository
@@ -31,6 +32,7 @@ def build_runtime(
         inspector=RepositoryInspector(settings),
         test_runner=LocalTestRunner(settings),
         indexer=RepositoryIndexer(session),
+        workspace_manager=WorkspaceManager(settings),
         context_token_budget=settings.context_token_budget,
         heartbeat=heartbeat,
     )

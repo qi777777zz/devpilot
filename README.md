@@ -4,9 +4,10 @@ DevPilot is a recoverable agent runtime for repository-level software engineerin
 an engineering requirement into a durable sequence of repository inspection, planning, change
 proposal, testing, review, and reporting steps.
 
-The current milestone is intentionally **offline and non-mutating**. It demonstrates runtime
-recovery and traceability without an API key, and it will not edit repository files before tool
-permissions, idempotency, sandboxing, and rollback are implemented.
+The bundled provider is intentionally offline and proposes no edits, so the project runs without
+an API key. Providers that return a unified diff enter a policy-gated staging workflow: DevPilot
+copies the repository, applies and tests the patch there, verifies that the source repository did
+not change, and removes the staging workspace after the run.
 
 ## What works now
 
@@ -19,6 +20,9 @@ permissions, idempotency, sandboxing, and rollback are implemented.
 - Repository boundary validation and deterministic metadata snapshots
 - Tree-sitter module/class/function indexing with stable content-aware cache keys
 - Explainable BM25, symbol, path, and reference retrieval under a context budget
+- Unified-diff parsing with path, file type, size, and file-count safety policies
+- Isolated patch staging with preflight validation and source-integrity verification
+- Automatic staging cleanup after success, cancellation, and terminal failure
 - Offline provider for repeatable planning, proposals, and reviews
 - Opt-in, shell-free test execution
 - SQLite local persistence behind a repository boundary
@@ -69,6 +73,7 @@ Task service -----> tasks + events + checkpoints + artifacts
 Agent runtime ----> provider contract
         |
         +----------> repository inspector
+        +----------> patch policy -> isolated workspace
         +----------> opt-in test runner
 ```
 
@@ -79,7 +84,7 @@ Read [the runtime design](docs/architecture/runtime.md) and the
 
 1. Redis Streams transport adapter for the existing lease contract
 2. Embedding and pgvector candidate retrieval with measured ablation
-3. Patch policy, isolated execution, validation, and rollback
+3. Container-level resource isolation for untrusted test commands
 4. Measured single-agent versus multi-agent comparison
 5. RepoTaskBench evaluation and expanded failure-injection experiments
 

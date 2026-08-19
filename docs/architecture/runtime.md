@@ -2,7 +2,8 @@
 
 DevPilot treats a repository task as a durable sequence of control points rather than a single
 model call. The first release deliberately uses a deterministic offline provider so runtime
-behavior can be tested without network access or repository mutation.
+behavior can be tested without network access. A provider-supplied patch is never applied to the
+source repository; it is validated and executed in a disposable staging workspace.
 
 ## Durable records
 
@@ -20,16 +21,19 @@ user-facing evidence.
 ## Initial workflow
 
 ```text
-validate -> inspect repository -> build plan -> propose change
-         -> run tests -> review -> finalize
+validate -> inspect repository -> retrieve context -> build plan -> propose change
+         -> validate and stage patch -> run tests -> review -> finalize and clean
 ```
 
 Every successful step atomically persists its execution result, checkpoint, artifacts, and event
 before the next step starts. A failed run can resume at the step following its newest checkpoint.
 Workers claim jobs using compare-and-swap leases, renew ownership after every node, and allow an
 expired lease to be reclaimed. A stale worker cannot acknowledge a job after ownership changes.
-Side-effecting patch tools are intentionally absent from this milestone; they will be added only
-with file policies and rollback.
+Patch application is bounded by an allowlist policy. Canonical unified diffs are checked for
+protected paths, traversal, binary content, file types, byte size, and changed-file count before a
+repository copy is created. `git apply --check` runs before application. Tests target the staged
+copy, the source digest is verified, and the staged copy is deleted after completion, cancellation,
+or a terminal failure. A resumed run reconstructs a missing staged copy from its checkpointed patch.
 
 ## Current boundaries
 
@@ -38,3 +42,5 @@ with file policies and rollback.
   same lease contract for distributed deployments.
 - The deterministic provider never edits files.
 - Local test commands are opt-in and run without a shell.
+- The staging workspace is not a hardened process sandbox; container-level CPU, memory, network,
+  and syscall isolation remains required before running untrusted commands.

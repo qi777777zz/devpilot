@@ -27,10 +27,18 @@ class Settings(BaseSettings):
     worker_lease_seconds: int = Field(default=30, ge=5, le=3600)
     worker_max_attempts: int = Field(default=3, ge=1, le=20)
     context_token_budget: int = Field(default=3000, ge=256, le=100_000)
+    workspace_storage_root: Path = Path("var/workspaces")
+    patch_max_bytes: int = Field(default=200_000, ge=1024, le=5_000_000)
+    patch_max_files: int = Field(default=20, ge=1, le=500)
 
     @field_validator("allowed_repository_root")
     @classmethod
     def resolve_repository_root(cls, value: Path) -> Path:
+        return value.expanduser().resolve()
+
+    @field_validator("workspace_storage_root")
+    @classmethod
+    def resolve_workspace_root(cls, value: Path) -> Path:
         return value.expanduser().resolve()
 
 

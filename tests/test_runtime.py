@@ -9,6 +9,7 @@ from devpilot.db import Database
 from devpilot.domain import TaskCreate
 from devpilot.errors import RetryableStepError
 from devpilot.indexing import RepositoryIndexer
+from devpilot.patching import WorkspaceManager
 from devpilot.providers import AgentContext, DeterministicProvider
 from devpilot.repository import TaskRepository
 from devpilot.runtime import AgentRuntime
@@ -48,6 +49,7 @@ def build_runtime(
         RepositoryInspector(settings),
         LocalTestRunner(settings),
         RepositoryIndexer(session),
+        WorkspaceManager(settings),
         settings.context_token_budget,
     )
     return runtime, repository

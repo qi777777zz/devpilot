@@ -18,6 +18,7 @@ from devpilot.errors import (
 )
 from devpilot.executions import StepExecutions
 from devpilot.indexing import RepositoryIndexer
+from devpilot.patching import WorkspaceManager
 from devpilot.providers import AgentContext, ModelProvider
 from devpilot.repository import TaskRepository
 from devpilot.retrieval import HybridCodeRetriever
@@ -34,6 +35,8 @@ class RunState:
     code_context: dict[str, Any] | None = None
     plan: dict[str, Any] | None = None
     proposal: dict[str, Any] | None = None
+    patch_validation: dict[str, Any] | None = None
+    workspace_root: str | None = None
     test_report: dict[str, Any] | None = None
     review: dict[str, Any] | None = None
 
@@ -47,6 +50,8 @@ class RunState:
             "code_context": self.code_context,
             "plan": self.plan,
             "proposal": self.proposal,
+            "patch_validation": self.patch_validation,
+            "workspace_root": self.workspace_root,
             "test_report": self.test_report,
             "review": self.review,
         }
@@ -62,6 +67,8 @@ class RunState:
             code_context=payload.get("code_context"),
             plan=payload.get("plan"),
             proposal=payload.get("proposal"),
+            patch_validation=payload.get("patch_validation"),
+            workspace_root=payload.get("workspace_root"),
             test_report=payload.get("test_report"),
             review=payload.get("review"),
         )
@@ -77,6 +84,7 @@ class AgentRuntime:
         inspector: RepositoryInspector,
         test_runner: LocalTestRunner,
         indexer: RepositoryIndexer,
+        workspace_manager: WorkspaceManager,
         context_token_budget: int,
         heartbeat: Callable[[], None] | None = None,
     ) -> None:
@@ -87,6 +95,7 @@ class AgentRuntime:
         self.inspector = inspector
         self.test_runner = test_runner
         self.indexer = indexer
+        self.workspace_manager = workspace_manager
         self.context_token_budget = context_token_budget
         self.heartbeat = heartbeat
         self.handlers: dict[RunStep, Callable[[RunState], str]] = {
@@ -95,6 +104,7 @@ class AgentRuntime:
             RunStep.RETRIEVE_CONTEXT: self._retrieve_context,
             RunStep.BUILD_PLAN: self._build_plan,
             RunStep.PROPOSE_CHANGE: self._propose_change,
+            RunStep.VALIDATE_PATCH: self._validate_patch,
             RunStep.RUN_TESTS: self._run_tests,
             RunStep.REVIEW: self._review,
             RunStep.FINALIZE: self._finalize,
@@ -136,6 +146,7 @@ class AgentRuntime:
                 self.session.expire_all()
                 current = self.tasks.get(task_id)
                 if current.status == TaskStatus.CANCELLED:
+                    self._cleanup_workspace(state)
                     return
                 if monotonic() - started > task.budget.max_wall_seconds:
                     raise BudgetExceededError("Task wall-clock budget exceeded")
@@ -143,7 +154,9 @@ class AgentRuntime:
         except Exception as exc:
             self.session.expire_all()
             if self.tasks.get(task_id).status == TaskStatus.CANCELLED:
+                self._cleanup_workspace(state)
                 return
+            self._cleanup_workspace(state)
             self.tasks.set_status(
                 task_id,
                 TaskStatus.FAILED,
@@ -288,7 +301,8 @@ class AgentRuntime:
     def _run_tests(self, state: RunState) -> str:
         if state.repository is None:
             raise RuntimeErrorBase("Repository evidence is missing")
-        state.test_report = self.test_runner.run(str(state.repository["root"]))
+        root = self._ensure_workspace(state)
+        state.test_report = self.test_runner.run(root)
         self.tasks.add_artifact(
             state.task_id,
             ArtifactKind.TEST_REPORT,
@@ -296,6 +310,33 @@ class AgentRuntime:
             state.test_report,
         )
         return f"Test stage finished with status {state.test_report['status']}."
+
+    def _validate_patch(self, state: RunState) -> str:
+        patch = (state.proposal or {}).get("patch")
+        if not isinstance(patch, str) or not patch.strip():
+            report: dict[str, Any] = {
+                "status": "skipped",
+                "reason": "The selected provider did not propose a patch.",
+                "workspace_root": None,
+                "source_unchanged": True,
+            }
+        else:
+            if state.repository is None:
+                raise RuntimeErrorBase("Repository evidence is missing")
+            report = self.workspace_manager.apply(
+                state.task_id,
+                str(state.repository["root"]),
+                patch,
+            )
+            state.workspace_root = str(report["workspace_root"])
+        state.patch_validation = report
+        self.tasks.add_artifact(
+            state.task_id,
+            ArtifactKind.PATCH_VALIDATION,
+            "Patch safety validation",
+            report,
+        )
+        return f"Patch safety stage finished with status {report['status']}."
 
     def _review(self, state: RunState) -> str:
         state.review = self.provider.review(self._context(state))
@@ -308,12 +349,16 @@ class AgentRuntime:
         return f"Review decision: {state.review['decision']}."
 
     def _finalize(self, state: RunState) -> str:
+        workspace_was_created = state.workspace_root is not None
+        self._cleanup_workspace(state)
         result = {
-            "outcome": "dry_run_completed",
+            "outcome": ("staged_patch_verified" if workspace_was_created else "dry_run_completed"),
             "provider": self.provider.name,
             "repository_digest": (state.repository or {}).get("tree_digest"),
             "test_status": (state.test_report or {}).get("status"),
             "review_decision": (state.review or {}).get("decision"),
+            "patch_status": (state.patch_validation or {}).get("status"),
+            "workspace_cleaned": True,
         }
         self.tasks.add_artifact(
             state.task_id,
@@ -325,7 +370,7 @@ class AgentRuntime:
             state.task_id,
             TaskStatus.COMPLETED,
             result_summary=(
-                "Dry run completed with a traceable plan, proposal, test stage, and review."
+                "Run completed with a traceable plan, policy-gated patch stage, tests, and review."
             ),
         )
         self.tasks.append_event(
@@ -355,5 +400,30 @@ class AgentRuntime:
         state.code_context = restored.code_context
         state.plan = restored.plan
         state.proposal = restored.proposal
+        state.patch_validation = restored.patch_validation
+        state.workspace_root = restored.workspace_root
         state.test_report = restored.test_report
         state.review = restored.review
+
+    def _ensure_workspace(self, state: RunState) -> str:
+        if state.repository is None:
+            raise RuntimeErrorBase("Repository evidence is missing")
+        patch = (state.proposal or {}).get("patch")
+        if not isinstance(patch, str) or not patch.strip():
+            return str(state.repository["root"])
+        if state.workspace_root is not None:
+            workspace = self.workspace_manager.path_for(state.task_id)
+            if workspace.is_dir():
+                return str(workspace)
+        report = self.workspace_manager.apply(
+            state.task_id,
+            str(state.repository["root"]),
+            patch,
+        )
+        state.workspace_root = str(report["workspace_root"])
+        state.patch_validation = report
+        return state.workspace_root
+
+    def _cleanup_workspace(self, state: RunState) -> None:
+        self.workspace_manager.cleanup(state.task_id)
+        state.workspace_root = None

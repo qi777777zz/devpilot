@@ -16,3 +16,11 @@ class RetryableStepError(RuntimeErrorBase):
 
 class LeaseLostError(RuntimeErrorBase):
     """The worker no longer owns the job it attempted to update."""
+
+
+class PatchPolicyError(RuntimeErrorBase):
+    """A proposed patch violates a deterministic repository safety rule."""
+
+
+class PatchApplyError(RuntimeErrorBase):
+    """A policy-approved patch cannot be applied to the staged workspace."""
