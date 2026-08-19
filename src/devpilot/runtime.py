@@ -259,7 +259,12 @@ class AgentRuntime:
         return f"Indexed repository metadata for {state.repository['file_count']} files."
 
     def _build_plan(self, state: RunState) -> str:
-        state.plan = self.provider.build_plan(self._context(state))
+        state.plan = self._invoke_model(
+            state,
+            RunStep.BUILD_PLAN,
+            "planner",
+            lambda: self.provider.build_plan(self._context(state)),
+        )
         self.tasks.add_artifact(
             state.task_id,
             ArtifactKind.IMPLEMENTATION_PLAN,
@@ -289,14 +294,19 @@ class AgentRuntime:
         )
 
     def _propose_change(self, state: RunState) -> str:
-        state.proposal = self.provider.propose_change(self._context(state))
+        state.proposal = self._invoke_model(
+            state,
+            RunStep.PROPOSE_CHANGE,
+            "implementer",
+            lambda: self.provider.propose_change(self._context(state)),
+        )
         self.tasks.add_artifact(
             state.task_id,
             ArtifactKind.CHANGE_PROPOSAL,
             "Change proposal",
             state.proposal,
         )
-        return "Recorded a dry-run change proposal."
+        return "Recorded a structured change proposal."
 
     def _run_tests(self, state: RunState) -> str:
         if state.repository is None:
@@ -339,7 +349,12 @@ class AgentRuntime:
         return f"Patch safety stage finished with status {report['status']}."
 
     def _review(self, state: RunState) -> str:
-        state.review = self.provider.review(self._context(state))
+        state.review = self._invoke_model(
+            state,
+            RunStep.REVIEW,
+            "reviewer",
+            lambda: self.provider.review(self._context(state)),
+        )
         self.tasks.add_artifact(
             state.task_id,
             ArtifactKind.REVIEW_REPORT,
@@ -358,6 +373,7 @@ class AgentRuntime:
             "test_status": (state.test_report or {}).get("status"),
             "review_decision": (state.review or {}).get("decision"),
             "patch_status": (state.patch_validation or {}).get("status"),
+            "model_calls": self.tasks.count_events(state.task_id, EventKind.MODEL_CALL_STARTED),
             "workspace_cleaned": True,
         }
         self.tasks.add_artifact(
@@ -389,6 +405,7 @@ class AgentRuntime:
             code_context=state.code_context,
             plan=state.plan,
             proposal=state.proposal,
+            patch_validation=state.patch_validation,
             test_report=state.test_report,
         )
 
@@ -427,3 +444,73 @@ class AgentRuntime:
     def _cleanup_workspace(self, state: RunState) -> None:
         self.workspace_manager.cleanup(state.task_id)
         state.workspace_root = None
+
+    def _invoke_model(
+        self,
+        state: RunState,
+        step: RunStep,
+        role: str,
+        call: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not self.provider.uses_model:
+            return call()
+        task = self.tasks.get(state.task_id)
+        used = self.tasks.count_events(state.task_id, EventKind.MODEL_CALL_STARTED)
+        if used >= task.budget.max_model_calls:
+            raise BudgetExceededError(
+                f"Model call budget exhausted before {role}: {used}/{task.budget.max_model_calls}"
+            )
+        call_number = used + 1
+        metadata = {
+            "role": role,
+            "provider": self.provider.name,
+            "model": self.provider.model,
+            "call_number": call_number,
+            "budget": task.budget.max_model_calls,
+        }
+        self.tasks.append_event(
+            state.task_id,
+            EventKind.MODEL_CALL_STARTED,
+            f"Started structured {role} model call.",
+            step=step,
+            payload=metadata,
+        )
+        self.tasks.commit()
+        if self.heartbeat is not None:
+            self.heartbeat()
+        call_started = monotonic()
+        try:
+            result = call()
+        except Exception as exc:
+            duration_ms = round((monotonic() - call_started) * 1000, 3)
+            self.tasks.append_event(
+                state.task_id,
+                EventKind.MODEL_CALL_FAILED,
+                f"Structured {role} model call failed.",
+                step=step,
+                payload={
+                    **metadata,
+                    "duration_ms": duration_ms,
+                    "error_type": type(exc).__name__,
+                },
+            )
+            self.tasks.commit()
+            raise
+        duration_ms = round((monotonic() - call_started) * 1000, 3)
+        call_metadata = self.provider.call_metadata()
+        allowed_metadata = {
+            key: call_metadata[key]
+            for key in ("request_id", "input_tokens", "output_tokens", "total_tokens")
+            if key in call_metadata
+        }
+        self.tasks.append_event(
+            state.task_id,
+            EventKind.MODEL_CALL_COMPLETED,
+            f"Structured {role} model call completed.",
+            step=step,
+            payload={**metadata, "duration_ms": duration_ms, **allowed_metadata},
+        )
+        self.tasks.commit()
+        if self.heartbeat is not None:
+            self.heartbeat()
+        return result

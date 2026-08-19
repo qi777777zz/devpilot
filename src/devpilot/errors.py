@@ -24,3 +24,7 @@ class PatchPolicyError(RuntimeErrorBase):
 
 class PatchApplyError(RuntimeErrorBase):
     """A policy-approved patch cannot be applied to the staged workspace."""
+
+
+class ModelProviderError(RuntimeErrorBase):
+    """A model request or structured response failed deterministically."""

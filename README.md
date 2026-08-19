@@ -24,6 +24,9 @@ not change, and removes the staging workspace after the run.
 - Isolated patch staging with preflight validation and source-integrity verification
 - Automatic staging cleanup after success, cancellation, and terminal failure
 - Offline provider for repeatable planning, proposals, and reviews
+- Optional OpenAI Responses provider with strict Pydantic outputs
+- Role-separated Planner, Implementer, and independent Reviewer prompts
+- Durable model-call budgets with latency, request ID, and token telemetry
 - Opt-in, shell-free test execution
 - SQLite local persistence behind a repository boundary
 - Automated API, recovery, safety, and tool tests
@@ -44,6 +47,19 @@ Open <http://127.0.0.1:8000>. API documentation is available at
 <http://127.0.0.1:8000/docs>.
 
 On macOS or Linux, activate the environment with `source .venv/bin/activate`.
+
+The default provider is deterministic and makes no network calls. To opt into the structured
+OpenAI provider, set the following values in `.env`:
+
+```dotenv
+DEVPILOT_MODEL_PROVIDER=openai
+DEVPILOT_OPENAI_API_KEY=your-api-key
+DEVPILOT_OPENAI_MODEL=gpt-5.6
+```
+
+The key is read from the environment and is never stored in task events or artifacts. Structured
+model output still passes through the local patch policy; enabling a provider does not grant direct
+filesystem or command access.
 
 ## Run with Docker
 
@@ -70,7 +86,7 @@ HTTP / Run console
 Task service -----> tasks + events + checkpoints + artifacts
         |
         v
-Agent runtime ----> provider contract
+Agent runtime ----> provider contract -> Planner / Implementer / Reviewer
         |
         +----------> repository inspector
         +----------> patch policy -> isolated workspace
@@ -85,7 +101,7 @@ Read [the runtime design](docs/architecture/runtime.md) and the
 1. Redis Streams transport adapter for the existing lease contract
 2. Embedding and pgvector candidate retrieval with measured ablation
 3. Container-level resource isolation for untrusted test commands
-4. Measured single-agent versus multi-agent comparison
+4. Measured one-pass versus reviewer-guided revision comparison
 5. RepoTaskBench evaluation and expanded failure-injection experiments
 
 Metrics will be published only after they can be reproduced from the evaluation harness.

@@ -158,6 +158,15 @@ class TaskRepository:
             .limit(1)
         )
 
+    def count_events(self, task_id: UUID, kind: EventKind) -> int:
+        count = self.session.scalar(
+            select(func.count(RunEventRecord.id)).where(
+                RunEventRecord.task_id == str(task_id),
+                RunEventRecord.kind == kind.value,
+            )
+        )
+        return int(count or 0)
+
     def commit(self) -> None:
         self.session.commit()
 

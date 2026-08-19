@@ -41,6 +41,10 @@ or a terminal failure. A resumed run reconstructs a missing staged copy from its
 - The database queue is the deterministic reference transport; Redis Streams will implement the
   same lease contract for distributed deployments.
 - The deterministic provider never edits files.
+- The optional Responses provider returns Pydantic-validated Planner, Implementer, and Reviewer
+  objects. Provider roles receive only the evidence needed for their step.
+- Every real model attempt consumes the task's durable model-call budget and records sanitized
+  latency, request ID, and token usage metadata in the event trace.
 - Local test commands are opt-in and run without a shell.
 - The staging workspace is not a hardened process sandbox; container-level CPU, memory, network,
   and syscall isolation remains required before running untrusted commands.

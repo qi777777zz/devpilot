@@ -6,11 +6,11 @@ import pytest
 
 from devpilot.config import Settings
 from devpilot.db import Database
-from devpilot.domain import TaskCreate
-from devpilot.errors import RetryableStepError
+from devpilot.domain import TaskBudget, TaskCreate
+from devpilot.errors import BudgetExceededError, RetryableStepError
 from devpilot.indexing import RepositoryIndexer
 from devpilot.patching import WorkspaceManager
-from devpilot.providers import AgentContext, DeterministicProvider
+from devpilot.providers import AgentContext, DeterministicProvider, ModelProvider
 from devpilot.repository import TaskRepository
 from devpilot.runtime import AgentRuntime
 from devpilot.tools import LocalTestRunner, RepositoryInspector, ToolExecutionError
@@ -28,6 +28,10 @@ class FailPlanOnceProvider(DeterministicProvider):
 
 
 class TransientPlanProvider(DeterministicProvider):
+    name = "transient-test-provider"
+    model = "test-model"
+    uses_model = True
+
     def __init__(self) -> None:
         self.calls = 0
 
@@ -38,8 +42,14 @@ class TransientPlanProvider(DeterministicProvider):
         return super().build_plan(context)
 
 
+class BudgetedModelProvider(DeterministicProvider):
+    name = "budgeted-test-provider"
+    model = "test-model"
+    uses_model = True
+
+
 def build_runtime(
-    database: Database, settings: Settings, provider: DeterministicProvider
+    database: Database, settings: Settings, provider: ModelProvider
 ) -> tuple[AgentRuntime, TaskRepository]:
     session = database.session_factory()
     repository = TaskRepository(session)
@@ -117,3 +127,53 @@ def test_transient_step_failure_retries_inside_same_run(
     retry_events = [event for event in completed.events if event.kind.value == "step.retrying"]
     assert len(retry_events) == 1
     assert retry_events[0].payload["attempt"] == 2
+    model_starts = [event for event in completed.events if event.kind.value == "model.call.started"]
+    model_failures = [
+        event for event in completed.events if event.kind.value == "model.call.failed"
+    ]
+    assert len(model_starts) == 4
+    assert len(model_failures) == 1
+
+
+def test_model_call_budget_stops_before_third_role(database: Database, settings: Settings) -> None:
+    runtime, tasks = build_runtime(database, settings, BudgetedModelProvider())
+    task = tasks.create(
+        TaskCreate(
+            title="Enforce model call budget",
+            requirement="Allow planner and implementer calls but stop before reviewer execution.",
+            repository_path=".",
+            budget=TaskBudget(max_model_calls=2),
+        )
+    )
+
+    with pytest.raises(BudgetExceededError, match="2/2"):
+        runtime.run(task.id)
+
+    detail = tasks.get_detail(task.id)
+    started = [event for event in detail.events if event.kind.value == "model.call.started"]
+    completed = [event for event in detail.events if event.kind.value == "model.call.completed"]
+    assert detail.status.value == "failed"
+    assert [event.payload["role"] for event in started] == ["planner", "implementer"]
+    assert len(completed) == 2
+    assert all("duration_ms" in event.payload for event in completed)
+
+
+def test_offline_provider_does_not_consume_model_budget(
+    database: Database, settings: Settings
+) -> None:
+    runtime, tasks = build_runtime(database, settings, DeterministicProvider())
+    task = tasks.create(
+        TaskCreate(
+            title="Run offline without model budget",
+            requirement="Complete the deterministic workflow without making any external calls.",
+            repository_path=".",
+            budget=TaskBudget(max_model_calls=0),
+        )
+    )
+
+    runtime.run(task.id)
+
+    detail = tasks.get_detail(task.id)
+    assert detail.status.value == "completed"
+    assert not [event for event in detail.events if event.kind.value.startswith("model.call")]
+    assert detail.artifacts[-1].content["model_calls"] == 0

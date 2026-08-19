@@ -14,7 +14,7 @@ from devpilot.domain import EventKind, TaskStatus
 from devpilot.errors import InvalidTaskStateError, LeaseLostError, RetryableStepError
 from devpilot.indexing import RepositoryIndexer
 from devpilot.patching import WorkspaceManager
-from devpilot.providers import DeterministicProvider
+from devpilot.providers import build_provider
 from devpilot.queue import JobQueue
 from devpilot.repository import TaskRepository
 from devpilot.runtime import AgentRuntime
@@ -28,7 +28,7 @@ def build_runtime(
 ) -> AgentRuntime:
     return AgentRuntime(
         session=session,
-        provider=DeterministicProvider(),
+        provider=build_provider(settings),
         inspector=RepositoryInspector(settings),
         test_runner=LocalTestRunner(settings),
         indexer=RepositoryIndexer(session),
@@ -97,10 +97,25 @@ class Worker:
         def renew_lease() -> None:
             lease_holder[0] = queue.heartbeat(lease_holder[0], self.settings.worker_lease_seconds)
 
-        runtime = build_runtime(self.session, self.settings, heartbeat=renew_lease)
         try:
+            runtime = build_runtime(self.session, self.settings, heartbeat=renew_lease)
             runtime.run(lease.task_id)
         except Exception as exc:
+            self.session.expire_all()
+            current = tasks.get(lease.task_id)
+            if current.status not in {TaskStatus.FAILED, TaskStatus.CANCELLED}:
+                tasks.set_status(
+                    lease.task_id,
+                    TaskStatus.FAILED,
+                    error_message=f"{type(exc).__name__}: {exc}",
+                )
+                tasks.append_event(
+                    lease.task_id,
+                    EventKind.TASK_FAILED,
+                    "Worker could not initialize or complete the runtime.",
+                    payload={"error_type": type(exc).__name__, "error": str(exc)},
+                )
+                tasks.commit()
             try:
                 queue.fail(
                     lease,

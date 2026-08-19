@@ -12,6 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "DevPilot Contributors" }]
 dependencies = [
   "fastapi>=0.115,<1.0",
+  "openai>=2.8,<3.0",
   "pydantic-settings>=2.7,<3.0",
   "sqlalchemy>=2.0,<3.0",
   "tree-sitter>=0.25.1,<0.26",
