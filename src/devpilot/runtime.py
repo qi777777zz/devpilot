@@ -17,8 +17,10 @@ from devpilot.errors import (
     RuntimeErrorBase,
 )
 from devpilot.executions import StepExecutions
+from devpilot.indexing import RepositoryIndexer
 from devpilot.providers import AgentContext, ModelProvider
 from devpilot.repository import TaskRepository
+from devpilot.retrieval import HybridCodeRetriever
 from devpilot.tools import LocalTestRunner, RepositoryInspector
 
 
@@ -29,6 +31,7 @@ class RunState:
     repository_path: str
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     repository: dict[str, Any] | None = None
+    code_context: dict[str, Any] | None = None
     plan: dict[str, Any] | None = None
     proposal: dict[str, Any] | None = None
     test_report: dict[str, Any] | None = None
@@ -41,6 +44,7 @@ class RunState:
             "repository_path": self.repository_path,
             "started_at": self.started_at.isoformat(),
             "repository": self.repository,
+            "code_context": self.code_context,
             "plan": self.plan,
             "proposal": self.proposal,
             "test_report": self.test_report,
@@ -55,6 +59,7 @@ class RunState:
             repository_path=str(payload["repository_path"]),
             started_at=datetime.fromisoformat(str(payload["started_at"])),
             repository=payload.get("repository"),
+            code_context=payload.get("code_context"),
             plan=payload.get("plan"),
             proposal=payload.get("proposal"),
             test_report=payload.get("test_report"),
@@ -71,6 +76,8 @@ class AgentRuntime:
         provider: ModelProvider,
         inspector: RepositoryInspector,
         test_runner: LocalTestRunner,
+        indexer: RepositoryIndexer,
+        context_token_budget: int,
         heartbeat: Callable[[], None] | None = None,
     ) -> None:
         self.tasks = TaskRepository(session)
@@ -79,10 +86,13 @@ class AgentRuntime:
         self.provider = provider
         self.inspector = inspector
         self.test_runner = test_runner
+        self.indexer = indexer
+        self.context_token_budget = context_token_budget
         self.heartbeat = heartbeat
         self.handlers: dict[RunStep, Callable[[RunState], str]] = {
             RunStep.VALIDATE: self._validate,
             RunStep.INSPECT_REPOSITORY: self._inspect_repository,
+            RunStep.RETRIEVE_CONTEXT: self._retrieve_context,
             RunStep.BUILD_PLAN: self._build_plan,
             RunStep.PROPOSE_CHANGE: self._propose_change,
             RunStep.RUN_TESTS: self._run_tests,
@@ -245,6 +255,26 @@ class AgentRuntime:
         )
         return f"Built a plan with {len(state.plan.get('steps', []))} steps."
 
+    def _retrieve_context(self, state: RunState) -> str:
+        if state.repository is None:
+            raise RuntimeErrorBase("Repository evidence is missing")
+        chunks = self.indexer.index(state.repository)
+        retriever = HybridCodeRetriever(chunks)
+        state.code_context = retriever.build_context(
+            state.requirement,
+            token_budget=self.context_token_budget,
+        )
+        self.tasks.add_artifact(
+            state.task_id,
+            ArtifactKind.CODE_CONTEXT,
+            "Repository-aware code context",
+            state.code_context,
+        )
+        return (
+            f"Selected {state.code_context['selected_count']} code chunks "
+            f"from {state.code_context['candidate_count']} candidates."
+        )
+
     def _propose_change(self, state: RunState) -> str:
         state.proposal = self.provider.propose_change(self._context(state))
         self.tasks.add_artifact(
@@ -311,6 +341,7 @@ class AgentRuntime:
         return AgentContext(
             requirement=state.requirement,
             repository=state.repository or {},
+            code_context=state.code_context,
             plan=state.plan,
             proposal=state.proposal,
             test_report=state.test_report,
@@ -321,6 +352,7 @@ class AgentRuntime:
         restored = RunState.restore(payload)
         state.started_at = restored.started_at
         state.repository = restored.repository
+        state.code_context = restored.code_context
         state.plan = restored.plan
         state.proposal = restored.proposal
         state.test_report = restored.test_report

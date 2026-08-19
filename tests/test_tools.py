@@ -12,6 +12,15 @@ def test_repository_snapshot_is_stable(settings: Settings) -> None:
     assert first["languages"] == {"Python": 1}
 
 
+def test_repository_digest_changes_with_file_content(settings: Settings) -> None:
+    inspector = RepositoryInspector(settings)
+    before = inspector.inspect(".")
+    sample = settings.allowed_repository_root / "src" / "sample.py"
+    sample.write_text("def answer():\n    return 43\n", encoding="utf-8")
+    after = inspector.inspect(".")
+    assert before["tree_digest"] != after["tree_digest"]
+
+
 def test_local_test_execution_is_opt_in(settings: Settings) -> None:
     report = LocalTestRunner(settings).run(str(settings.allowed_repository_root))
     assert report["status"] == "skipped"

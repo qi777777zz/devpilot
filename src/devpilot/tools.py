@@ -23,16 +23,24 @@ class RepositoryInspector:
     def inspect(self, repository_path: str) -> dict[str, Any]:
         root = self._resolve_allowed_path(repository_path)
         files: list[str] = []
+        digest_entries: list[str] = []
         ignored_parts = {".git", ".venv", "node_modules", "dist", "__pycache__", "var"}
         for path in root.rglob("*"):
             if any(part in ignored_parts for part in path.parts):
                 continue
             if path.is_file():
-                files.append(path.relative_to(root).as_posix())
+                relative_path = path.relative_to(root).as_posix()
+                files.append(relative_path)
+                try:
+                    content_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                except OSError:
+                    content_digest = "unreadable"
+                digest_entries.append(f"{relative_path}:{content_digest}")
                 if len(files) >= self.max_files:
                     break
         files.sort()
-        digest = hashlib.sha256("\n".join(files).encode()).hexdigest()
+        digest_entries.sort()
+        digest = hashlib.sha256("\n".join(digest_entries).encode()).hexdigest()
         languages = self._language_counts(files)
         return {
             "root": str(root),
@@ -40,6 +48,7 @@ class RepositoryInspector:
             "truncated": len(files) >= self.max_files,
             "tree_digest": digest,
             "languages": languages,
+            "files": files,
             "sample_files": files[: self.sample_limit],
         }
 

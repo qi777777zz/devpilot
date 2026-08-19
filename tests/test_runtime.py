@@ -8,6 +8,7 @@ from devpilot.config import Settings
 from devpilot.db import Database
 from devpilot.domain import TaskCreate
 from devpilot.errors import RetryableStepError
+from devpilot.indexing import RepositoryIndexer
 from devpilot.providers import AgentContext, DeterministicProvider
 from devpilot.repository import TaskRepository
 from devpilot.runtime import AgentRuntime
@@ -46,6 +47,8 @@ def build_runtime(
         provider,
         RepositoryInspector(settings),
         LocalTestRunner(settings),
+        RepositoryIndexer(session),
+        settings.context_token_budget,
     )
     return runtime, repository
 
@@ -66,7 +69,10 @@ def test_runtime_resumes_after_last_checkpoint(database: Database, settings: Set
 
     failed = tasks.get_detail(task.id)
     assert failed.status.value == "failed"
-    assert [artifact.kind.value for artifact in failed.artifacts] == ["repository_snapshot"]
+    assert [artifact.kind.value for artifact in failed.artifacts] == [
+        "repository_snapshot",
+        "code_context",
+    ]
 
     runtime.run(task.id)
     recovered = tasks.get_detail(task.id)
@@ -75,7 +81,7 @@ def test_runtime_resumes_after_last_checkpoint(database: Database, settings: Set
         len([item for item in recovered.artifacts if item.kind.value == "repository_snapshot"]) == 1
     )
     resumed_events = [event for event in recovered.events if event.kind.value == "task.started"]
-    assert resumed_events[-1].payload["resume_from"] == 2
+    assert resumed_events[-1].payload["resume_from"] == 3
 
 
 def test_inspector_rejects_path_outside_workspace(settings: Settings, tmp_path: Path) -> None:

@@ -153,6 +153,59 @@ class StepExecutionRecord(Base):
     task: Mapped[TaskRecord] = relationship(back_populates="step_executions")
 
 
+class RepositoryIndexRecord(Base):
+    __tablename__ = "repository_indexes"
+    __table_args__ = (
+        UniqueConstraint("repository_root", "tree_digest", name="uq_repository_tree_index"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    repository_root: Mapped[str] = mapped_column(String(1000), index=True)
+    tree_digest: Mapped[str] = mapped_column(String(64), index=True)
+    parser_version: Mapped[str] = mapped_column(String(64))
+    file_count: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    documents: Mapped[list[CodeDocumentRecord]] = relationship(
+        back_populates="index", cascade="all, delete-orphan"
+    )
+
+
+class CodeDocumentRecord(Base):
+    __tablename__ = "code_documents"
+    __table_args__ = (UniqueConstraint("index_id", "path", name="uq_index_document_path"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    index_id: Mapped[str] = mapped_column(ForeignKey("repository_indexes.id"), index=True)
+    path: Mapped[str] = mapped_column(String(1000))
+    language: Mapped[str] = mapped_column(String(64), index=True)
+    content_digest: Mapped[str] = mapped_column(String(64))
+    line_count: Mapped[int] = mapped_column(Integer)
+
+    index: Mapped[RepositoryIndexRecord] = relationship(back_populates="documents")
+    symbols: Mapped[list[CodeSymbolRecord]] = relationship(
+        back_populates="document", cascade="all, delete-orphan"
+    )
+
+
+class CodeSymbolRecord(Base):
+    __tablename__ = "code_symbols"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    document_id: Mapped[str] = mapped_column(ForeignKey("code_documents.id"), index=True)
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    qualified_name: Mapped[str] = mapped_column(String(1000), index=True)
+    kind: Mapped[str] = mapped_column(String(64), index=True)
+    start_line: Mapped[int] = mapped_column(Integer)
+    end_line: Mapped[int] = mapped_column(Integer)
+    signature: Mapped[str] = mapped_column(Text)
+    content: Mapped[str] = mapped_column(Text)
+    tokens: Mapped[list[str]] = mapped_column(JSON)
+    references: Mapped[list[str]] = mapped_column(JSON)
+
+    document: Mapped[CodeDocumentRecord] = relationship(back_populates="symbols")
+
+
 class Database:
     def __init__(self, settings: Settings) -> None:
         if settings.database_url.startswith("sqlite"):

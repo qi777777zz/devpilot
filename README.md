@@ -17,6 +17,8 @@ permissions, idempotency, sandboxing, and rollback are implemented.
 - Append-only run trace, durable artifacts, and checkpoints
 - Resume from the latest successful checkpoint after a failure
 - Repository boundary validation and deterministic metadata snapshots
+- Tree-sitter module/class/function indexing with stable content-aware cache keys
+- Explainable BM25, symbol, path, and reference retrieval under a context budget
 - Offline provider for repeatable planning, proposals, and reviews
 - Opt-in, shell-free test execution
 - SQLite local persistence behind a repository boundary
@@ -76,7 +78,7 @@ Read [the runtime design](docs/architecture/runtime.md) and the
 ## Roadmap
 
 1. Redis Streams transport adapter for the existing lease contract
-2. Tree-sitter symbol extraction and hybrid repository retrieval
+2. Embedding and pgvector candidate retrieval with measured ablation
 3. Patch policy, isolated execution, validation, and rollback
 4. Measured single-agent versus multi-agent comparison
 5. RepoTaskBench evaluation and expanded failure-injection experiments

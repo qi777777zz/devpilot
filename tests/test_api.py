@@ -29,7 +29,7 @@ def test_task_runs_through_api(settings: Settings) -> None:
         assert detail.status_code == 200
         payload = detail.json()
         assert payload["status"] == "completed"
-        assert len(payload["artifacts"]) == 6
+        assert len(payload["artifacts"]) == 7
         assert payload["artifacts"][-1]["kind"] == "final_report"
         assert any(event["kind"] == "task.completed" for event in payload["events"])
 

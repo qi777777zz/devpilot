@@ -8,6 +8,7 @@ from typing import Any, Protocol
 class AgentContext:
     requirement: str
     repository: dict[str, Any]
+    code_context: dict[str, Any] | None = None
     plan: dict[str, Any] | None = None
     proposal: dict[str, Any] | None = None
     test_report: dict[str, Any] | None = None

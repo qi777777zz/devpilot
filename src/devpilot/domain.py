@@ -36,6 +36,7 @@ class StepExecutionStatus(StrEnum):
 class RunStep(StrEnum):
     VALIDATE = "validate"
     INSPECT_REPOSITORY = "inspect_repository"
+    RETRIEVE_CONTEXT = "retrieve_context"
     BUILD_PLAN = "build_plan"
     PROPOSE_CHANGE = "propose_change"
     RUN_TESTS = "run_tests"
@@ -59,6 +60,7 @@ class EventKind(StrEnum):
 
 class ArtifactKind(StrEnum):
     REPOSITORY_SNAPSHOT = "repository_snapshot"
+    CODE_CONTEXT = "code_context"
     IMPLEMENTATION_PLAN = "implementation_plan"
     CHANGE_PROPOSAL = "change_proposal"
     TEST_REPORT = "test_report"
