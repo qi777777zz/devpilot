@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="DevPilot task execution console" />
+    <title>DevPilot · Run console</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <header class="masthead">
+      <a class="wordmark" href="/" aria-label="DevPilot home">
+        <span class="wordmark-mark" aria-hidden="true">D/P</span>
+        <span>DevPilot</span>
+      </a>
+      <div class="environment"><span class="pulse"></span> offline provider · safe mode</div>
+      <a class="api-link" href="/docs">API reference ↗</a>
+    </header>
+
+    <main class="shell">
+      <section class="intro" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">Repository task runtime</p>
+          <h1 id="page-title">Every decision leaves a trace.</h1>
+        </div>
+        <p class="intro-copy">
+          Turn an engineering requirement into a recoverable run. The current provider works
+          offline and records evidence without changing repository files.
+        </p>
+      </section>
+
+      <section class="workspace">
+        <aside class="composer" aria-labelledby="new-task-title">
+          <div class="section-heading">
+            <span class="section-code">NEW RUN</span>
+            <h2 id="new-task-title">Define the job</h2>
+          </div>
+          <form id="task-form">
+            <label>
+              Short title
+              <input id="title" name="title" minlength="3" maxlength="120" required
+                     value="Inspect the DevPilot runtime" />
+            </label>
+            <label>
+              Requirement
+              <textarea id="requirement" name="requirement" minlength="10" required>Inspect this repository and produce a safe, reviewable implementation plan for improving runtime observability.</textarea>
+            </label>
+            <label>
+              Repository path
+              <input id="repository" name="repository_path" required value="." />
+              <span class="field-hint">Paths are restricted to the configured workspace.</span>
+            </label>
+            <button class="primary-action" type="submit">
+              <span>Create and run</span><span aria-hidden="true">→</span>
+            </button>
+            <p id="form-message" class="form-message" role="status"></p>
+          </form>
+        </aside>
+
+        <section class="runs" aria-labelledby="runs-title">
+          <div class="section-heading runs-heading">
+            <div>
+              <span class="section-code">RUN LEDGER</span>
+              <h2 id="runs-title">Recent tasks</h2>
+            </div>
+            <button id="refresh" class="quiet-action" type="button">Refresh</button>
+          </div>
+          <div id="run-list" class="run-list" aria-live="polite"></div>
+        </section>
+      </section>
+    </main>
+
+    <template id="run-template">
+      <article class="run-card">
+        <button class="run-summary" type="button" aria-expanded="false">
+          <span class="status-rail" aria-hidden="true"></span>
+          <span class="run-main">
+            <span class="run-title"></span>
+            <span class="run-meta"></span>
+          </span>
+          <span class="status-chip"></span>
+          <span class="disclosure" aria-hidden="true">＋</span>
+        </button>
+        <div class="run-detail" hidden>
+          <p class="requirement"></p>
+          <div class="trace" aria-label="Execution trace"></div>
+          <div class="artifact-grid"></div>
+        </div>
+      </article>
+    </template>
+
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>

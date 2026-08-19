@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DEVPILOT_DATABASE_URL: sqlite:////app/var/devpilot.db
+      DEVPILOT_ALLOWED_REPOSITORY_ROOT: /workspace
+      DEVPILOT_ENABLE_LOCAL_EXECUTION: "false"
+    volumes:
+      - devpilot-data:/app/var
+      - ./:/workspace:ro
+    restart: unless-stopped
+
+volumes:
+  devpilot-data:
+

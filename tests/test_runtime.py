@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from devpilot.config import Settings
+from devpilot.db import Database
+from devpilot.domain import TaskCreate
+from devpilot.providers import AgentContext, DeterministicProvider
+from devpilot.repository import TaskRepository
+from devpilot.runtime import AgentRuntime
+from devpilot.tools import LocalTestRunner, RepositoryInspector, ToolExecutionError
+
+
+class FailPlanOnceProvider(DeterministicProvider):
+    def __init__(self) -> None:
+        self.failed = False
+
+    def build_plan(self, context: AgentContext) -> dict[str, object]:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("injected planner failure")
+        return super().build_plan(context)
+
+
+def build_runtime(
+    database: Database, settings: Settings, provider: DeterministicProvider
+) -> tuple[AgentRuntime, TaskRepository]:
+    session = database.session_factory()
+    repository = TaskRepository(session)
+    runtime = AgentRuntime(
+        session,
+        provider,
+        RepositoryInspector(settings),
+        LocalTestRunner(settings),
+    )
+    return runtime, repository
+
+
+def test_runtime_resumes_after_last_checkpoint(database: Database, settings: Settings) -> None:
+    provider = FailPlanOnceProvider()
+    runtime, tasks = build_runtime(database, settings, provider)
+    task = tasks.create(
+        TaskCreate(
+            title="Exercise checkpoint recovery",
+            requirement="Inspect the repository and recover after an injected planner failure.",
+            repository_path=".",
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="injected planner failure"):
+        runtime.run(task.id)
+
+    failed = tasks.get_detail(task.id)
+    assert failed.status.value == "failed"
+    assert [artifact.kind.value for artifact in failed.artifacts] == ["repository_snapshot"]
+
+    runtime.run(task.id)
+    recovered = tasks.get_detail(task.id)
+    assert recovered.status.value == "completed"
+    assert (
+        len([item for item in recovered.artifacts if item.kind.value == "repository_snapshot"]) == 1
+    )
+    resumed_events = [event for event in recovered.events if event.kind.value == "task.started"]
+    assert resumed_events[-1].payload["resume_from"] == 2
+
+
+def test_inspector_rejects_path_outside_workspace(settings: Settings, tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside-repository"
+    outside.mkdir(exist_ok=True)
+    inspector = RepositoryInspector(settings)
+    with pytest.raises(ToolExecutionError, match="must stay inside"):
+        inspector.inspect(str(outside))
