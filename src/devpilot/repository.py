@@ -6,11 +6,13 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from devpilot.db import ArtifactRecord, CheckpointRecord, RunEventRecord, TaskRecord
+from devpilot.db import ArtifactRecord, CheckpointRecord, JobRecord, RunEventRecord, TaskRecord
 from devpilot.domain import (
     ArtifactKind,
     ArtifactView,
     EventKind,
+    JobState,
+    JobView,
     RunEventView,
     RunStep,
     TaskBudget,
@@ -58,7 +60,9 @@ class TaskRepository:
         query = select(TaskRecord).where(TaskRecord.id == str(task_id))
         if with_children:
             query = query.options(
-                selectinload(TaskRecord.events), selectinload(TaskRecord.artifacts)
+                selectinload(TaskRecord.events),
+                selectinload(TaskRecord.artifacts),
+                selectinload(TaskRecord.jobs),
             )
         record = self.session.scalar(query)
         if record is None:
@@ -75,6 +79,7 @@ class TaskRepository:
             **view.model_dump(),
             events=[self._event_to_view(event) for event in record.events],
             artifacts=[self._artifact_to_view(artifact) for artifact in record.artifacts],
+            jobs=[self._job_to_view(job) for job in record.jobs],
         )
 
     def set_status(
@@ -193,5 +198,20 @@ class TaskRepository:
             kind=ArtifactKind(record.kind),
             name=record.name,
             content=record.content,
+            created_at=record.created_at,
+        )
+
+    @staticmethod
+    def _job_to_view(record: JobRecord) -> JobView:
+        return JobView(
+            id=UUID(record.id),
+            task_id=UUID(record.task_id),
+            state=JobState(record.state),
+            attempts=record.attempts,
+            max_attempts=record.max_attempts,
+            available_at=record.available_at,
+            lease_owner=record.lease_owner,
+            lease_expires_at=record.lease_expires_at,
+            last_error=record.last_error,
             created_at=record.created_at,
         )

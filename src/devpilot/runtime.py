@@ -10,21 +10,16 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from devpilot.domain import ArtifactKind, EventKind, RunStep, TaskStatus
+from devpilot.errors import (
+    BudgetExceededError,
+    InvalidTaskStateError,
+    RetryableStepError,
+    RuntimeErrorBase,
+)
+from devpilot.executions import StepExecutions
 from devpilot.providers import AgentContext, ModelProvider
 from devpilot.repository import TaskRepository
 from devpilot.tools import LocalTestRunner, RepositoryInspector
-
-
-class RuntimeErrorBase(RuntimeError):
-    pass
-
-
-class InvalidTaskStateError(RuntimeErrorBase):
-    pass
-
-
-class BudgetExceededError(RuntimeErrorBase):
-    pass
 
 
 @dataclass
@@ -76,11 +71,15 @@ class AgentRuntime:
         provider: ModelProvider,
         inspector: RepositoryInspector,
         test_runner: LocalTestRunner,
+        heartbeat: Callable[[], None] | None = None,
     ) -> None:
         self.tasks = TaskRepository(session)
+        self.executions = StepExecutions(session)
+        self.session = session
         self.provider = provider
         self.inspector = inspector
         self.test_runner = test_runner
+        self.heartbeat = heartbeat
         self.handlers: dict[RunStep, Callable[[RunState], str]] = {
             RunStep.VALIDATE: self._validate,
             RunStep.INSPECT_REPOSITORY: self._inspect_repository,
@@ -124,13 +123,17 @@ class AgentRuntime:
         try:
             for index in range(start_index, len(self.STEPS)):
                 step = self.STEPS[index]
+                self.session.expire_all()
                 current = self.tasks.get(task_id)
                 if current.status == TaskStatus.CANCELLED:
                     return
                 if monotonic() - started > task.budget.max_wall_seconds:
                     raise BudgetExceededError("Task wall-clock budget exceeded")
-                self._run_step(index, step, state)
+                self._run_step(index, step, state, task.budget.max_retries_per_step)
         except Exception as exc:
+            self.session.expire_all()
+            if self.tasks.get(task_id).status == TaskStatus.CANCELLED:
+                return
             self.tasks.set_status(
                 task_id,
                 TaskStatus.FAILED,
@@ -145,35 +148,77 @@ class AgentRuntime:
             self.tasks.commit()
             raise
 
-    def _run_step(self, index: int, step: RunStep, state: RunState) -> None:
+    def _run_step(
+        self,
+        index: int,
+        step: RunStep,
+        state: RunState,
+        max_retries: int,
+    ) -> None:
+        existing = self.executions.get(state.task_id, step)
+        if existing is not None and existing.status == "completed" and existing.result:
+            saved_state = existing.result.get("state")
+            if isinstance(saved_state, dict):
+                self._restore_into(state, saved_state)
+            return
+
         self.tasks.set_status(state.task_id, TaskStatus.RUNNING, current_step=step)
-        self.tasks.append_event(
-            state.task_id,
-            EventKind.STEP_STARTED,
-            f"Started {step.value}.",
-            step=step,
-        )
-        self.tasks.commit()
-        try:
-            summary = self.handlers[step](state)
-        except Exception as exc:
+        for retry_index in range(max_retries + 1):
+            execution = self.executions.begin(state.task_id, step)
+            event_kind = EventKind.STEP_STARTED if retry_index == 0 else EventKind.STEP_RETRYING
             self.tasks.append_event(
                 state.task_id,
-                EventKind.STEP_FAILED,
-                f"{step.value} failed.",
+                event_kind,
+                (
+                    f"Started {step.value}."
+                    if retry_index == 0
+                    else f"Retrying {step.value} after a transient failure."
+                ),
                 step=step,
-                payload={"error_type": type(exc).__name__, "error": str(exc)},
+                payload={"attempt": execution.attempt},
             )
             self.tasks.commit()
-            raise
-        self.tasks.save_checkpoint(state.task_id, index, step, state.checkpoint())
-        self.tasks.append_event(
-            state.task_id,
-            EventKind.STEP_COMPLETED,
-            summary,
-            step=step,
-        )
-        self.tasks.commit()
+            try:
+                summary = self.handlers[step](state)
+            except Exception as exc:
+                self.session.rollback()
+                failed_execution = self.executions.get(state.task_id, step)
+                if failed_execution is None:
+                    raise RuntimeErrorBase("Step execution record disappeared") from exc
+                self.executions.fail(failed_execution, f"{type(exc).__name__}: {exc}")
+                self.tasks.append_event(
+                    state.task_id,
+                    EventKind.STEP_FAILED,
+                    f"{step.value} failed.",
+                    step=step,
+                    payload={
+                        "attempt": failed_execution.attempt,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "retryable": isinstance(exc, RetryableStepError),
+                    },
+                )
+                self.tasks.commit()
+                if isinstance(exc, RetryableStepError) and retry_index < max_retries:
+                    continue
+                raise
+            checkpoint_state = state.checkpoint()
+            self.tasks.save_checkpoint(state.task_id, index, step, checkpoint_state)
+            self.executions.complete(
+                execution,
+                {"summary": summary, "state": checkpoint_state},
+            )
+            self.tasks.append_event(
+                state.task_id,
+                EventKind.STEP_COMPLETED,
+                summary,
+                step=step,
+                payload={"attempt": execution.attempt},
+            )
+            self.tasks.commit()
+            if self.heartbeat is not None:
+                self.heartbeat()
+            return
 
     def _validate(self, state: RunState) -> str:
         if len(state.requirement.strip()) < 10:
@@ -270,3 +315,13 @@ class AgentRuntime:
             proposal=state.proposal,
             test_report=state.test_report,
         )
+
+    @staticmethod
+    def _restore_into(state: RunState, payload: dict[str, Any]) -> None:
+        restored = RunState.restore(payload)
+        state.started_at = restored.started_at
+        state.repository = restored.repository
+        state.plan = restored.plan
+        state.proposal = restored.proposal
+        state.test_report = restored.test_report
+        state.review = restored.review

@@ -7,6 +7,7 @@ import pytest
 from devpilot.config import Settings
 from devpilot.db import Database
 from devpilot.domain import TaskCreate
+from devpilot.errors import RetryableStepError
 from devpilot.providers import AgentContext, DeterministicProvider
 from devpilot.repository import TaskRepository
 from devpilot.runtime import AgentRuntime
@@ -21,6 +22,17 @@ class FailPlanOnceProvider(DeterministicProvider):
         if not self.failed:
             self.failed = True
             raise RuntimeError("injected planner failure")
+        return super().build_plan(context)
+
+
+class TransientPlanProvider(DeterministicProvider):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def build_plan(self, context: AgentContext) -> dict[str, object]:
+        self.calls += 1
+        if self.calls == 1:
+            raise RetryableStepError("temporary model capacity error")
         return super().build_plan(context)
 
 
@@ -72,3 +84,28 @@ def test_inspector_rejects_path_outside_workspace(settings: Settings, tmp_path: 
     inspector = RepositoryInspector(settings)
     with pytest.raises(ToolExecutionError, match="must stay inside"):
         inspector.inspect(str(outside))
+
+
+def test_transient_step_failure_retries_inside_same_run(
+    database: Database, settings: Settings
+) -> None:
+    provider = TransientPlanProvider()
+    runtime, tasks = build_runtime(database, settings, provider)
+    task = tasks.create(
+        TaskCreate(
+            title="Retry a transient planner failure",
+            requirement=(
+                "Retry the planning node when the model reports a temporary capacity error."
+            ),
+            repository_path=".",
+        )
+    )
+
+    runtime.run(task.id)
+
+    completed = tasks.get_detail(task.id)
+    assert completed.status.value == "completed"
+    assert provider.calls == 2
+    retry_events = [event for event in completed.events if event.kind.value == "step.retrying"]
+    assert len(retry_events) == 1
+    assert retry_events[0].payload["attempt"] == 2

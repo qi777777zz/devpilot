@@ -11,20 +11,15 @@ from sqlalchemy.orm import Session
 
 from devpilot.config import Settings, get_settings
 from devpilot.db import Database
-from devpilot.domain import HealthView, TaskCreate, TaskDetail, TaskStatus, TaskView
+from devpilot.domain import HealthView, TaskCreate, TaskDetail, TaskView
+from devpilot.errors import InvalidTaskStateError
 from devpilot.repository import TaskNotFoundError, TaskRepository
-from devpilot.runtime import InvalidTaskStateError
-from devpilot.service import build_runtime, cancel_task
+from devpilot.service import Worker, cancel_task, enqueue_task
 
 
-def _run_in_background(database: Database, settings: Settings, task_id: UUID) -> None:
+def _run_worker_once(database: Database, settings: Settings) -> None:
     with database.session_factory() as session:
-        runtime = build_runtime(session, settings)
-        try:
-            runtime.run(task_id)
-        except Exception:
-            # Runtime persists structured failure evidence before re-raising.
-            return
+        Worker.create(session, settings, worker_id="api-in-process").run_once()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -79,15 +74,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session: SessionDependency,
     ) -> dict[str, str]:
         try:
-            task = TaskRepository(session).get(task_id)
+            TaskRepository(session).get(task_id)
         except TaskNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Task not found") from exc
-        if task.status not in {TaskStatus.PENDING, TaskStatus.FAILED, TaskStatus.PAUSED}:
-            raise HTTPException(
-                status_code=409, detail=f"Task cannot run from state {task.status.value}"
-            )
-        background_tasks.add_task(_run_in_background, database, app_settings, task_id)
-        return {"task_id": str(task_id), "status": "scheduled"}
+        try:
+            enqueue_task(session, app_settings, task_id)
+        except InvalidTaskStateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if app_settings.in_process_worker:
+            background_tasks.add_task(_run_worker_once, database, app_settings)
+        return {"task_id": str(task_id), "status": "queued"}
 
     @app.post("/api/v1/tasks/{task_id}/cancel", status_code=status.HTTP_202_ACCEPTED)
     def stop_task(task_id: UUID, session: SessionDependency) -> dict[str, str]:

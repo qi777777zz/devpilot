@@ -12,6 +12,8 @@ permissions, idempotency, sandboxing, and rollback are implemented.
 
 - Task API and browser-based run console
 - Step-level status transitions and wall-clock/step budgets
+- Durable queue with compare-and-swap worker leases and heartbeat renewal
+- Idempotent step records with classified retry behavior
 - Append-only run trace, durable artifacts, and checkpoints
 - Resume from the latest successful checkpoint after a failure
 - Repository boundary validation and deterministic metadata snapshots
@@ -73,10 +75,10 @@ Read [the runtime design](docs/architecture/runtime.md) and the
 
 ## Roadmap
 
-1. Worker leases, idempotent tools, retries, cancellation, and Redis Streams
+1. Redis Streams transport adapter for the existing lease contract
 2. Tree-sitter symbol extraction and hybrid repository retrieval
 3. Patch policy, isolated execution, validation, and rollback
 4. Measured single-agent versus multi-agent comparison
-5. RepoTaskBench evaluation and failure-injection experiments
+5. RepoTaskBench evaluation and expanded failure-injection experiments
 
 Metrics will be published only after they can be reproduced from the evaluation harness.

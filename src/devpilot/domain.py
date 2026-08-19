@@ -10,11 +10,27 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class TaskStatus(StrEnum):
     PENDING = "pending"
+    QUEUED = "queued"
     RUNNING = "running"
+    RETRYING = "retrying"
     COMPLETED = "completed"
     FAILED = "failed"
     PAUSED = "paused"
     CANCELLED = "cancelled"
+
+
+class JobState(StrEnum):
+    QUEUED = "queued"
+    LEASED = "leased"
+    COMPLETED = "completed"
+    DEAD = "dead"
+    CANCELLED = "cancelled"
+
+
+class StepExecutionStatus(StrEnum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
 
 
 class RunStep(StrEnum):
@@ -30,9 +46,12 @@ class RunStep(StrEnum):
 class EventKind(StrEnum):
     TASK_CREATED = "task.created"
     TASK_STARTED = "task.started"
+    TASK_QUEUED = "task.queued"
+    TASK_LEASED = "task.leased"
     STEP_STARTED = "step.started"
     STEP_COMPLETED = "step.completed"
     STEP_FAILED = "step.failed"
+    STEP_RETRYING = "step.retrying"
     TASK_COMPLETED = "task.completed"
     TASK_FAILED = "task.failed"
     TASK_CANCELLED = "task.cancelled"
@@ -52,6 +71,7 @@ class TaskBudget(BaseModel):
     max_model_calls: int = Field(default=10, ge=0, le=100)
     max_tool_calls: int = Field(default=20, ge=0, le=200)
     max_wall_seconds: int = Field(default=900, ge=10, le=86_400)
+    max_retries_per_step: int = Field(default=2, ge=0, le=10)
 
 
 class TaskCreate(BaseModel):
@@ -97,9 +117,23 @@ class ArtifactView(BaseModel):
     created_at: datetime
 
 
+class JobView(BaseModel):
+    id: UUID
+    task_id: UUID
+    state: JobState
+    attempts: int
+    max_attempts: int
+    available_at: datetime
+    lease_owner: str | None
+    lease_expires_at: datetime | None
+    last_error: str | None
+    created_at: datetime
+
+
 class TaskDetail(TaskView):
     events: list[RunEventView]
     artifacts: list[ArtifactView]
+    jobs: list[JobView]
 
 
 class HealthView(BaseModel):

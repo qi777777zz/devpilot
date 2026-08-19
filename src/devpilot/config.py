@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     allowed_repository_root: Path = Field(default_factory=Path.cwd)
     enable_local_execution: bool = False
     test_timeout_seconds: int = Field(default=120, ge=1, le=1800)
+    in_process_worker: bool = True
+    worker_poll_seconds: float = Field(default=1.0, ge=0.1, le=60)
+    worker_lease_seconds: int = Field(default=30, ge=5, le=3600)
+    worker_max_attempts: int = Field(default=3, ge=1, le=20)
 
     @field_validator("allowed_repository_root")
     @classmethod

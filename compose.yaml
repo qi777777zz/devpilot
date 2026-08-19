@@ -7,6 +7,20 @@ services:
       DEVPILOT_DATABASE_URL: sqlite:////app/var/devpilot.db
       DEVPILOT_ALLOWED_REPOSITORY_ROOT: /workspace
       DEVPILOT_ENABLE_LOCAL_EXECUTION: "false"
+      DEVPILOT_IN_PROCESS_WORKER: "false"
+    volumes:
+      - devpilot-data:/app/var
+      - ./:/workspace:ro
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["devpilot", "worker"]
+    environment:
+      DEVPILOT_DATABASE_URL: sqlite:////app/var/devpilot.db
+      DEVPILOT_ALLOWED_REPOSITORY_ROOT: /workspace
+      DEVPILOT_ENABLE_LOCAL_EXECUTION: "false"
+      DEVPILOT_IN_PROCESS_WORKER: "false"
     volumes:
       - devpilot-data:/app/var
       - ./:/workspace:ro
@@ -14,4 +28,3 @@ services:
 
 volumes:
   devpilot-data:
-

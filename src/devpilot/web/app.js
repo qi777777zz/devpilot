@@ -51,7 +51,17 @@ async function expandRun(card, taskId) {
     return row;
   }));
   const artifacts = detail.querySelector(".artifact-grid");
-  artifacts.replaceChildren(...task.artifacts.map((artifact) => {
+  const jobCards = task.jobs.map((job) => {
+    const item = document.createElement("div");
+    item.className = "artifact";
+    const title = document.createElement("strong");
+    title.textContent = `Queue · ${job.state}`;
+    const kind = document.createElement("span");
+    kind.textContent = `attempt ${job.attempts}/${job.max_attempts}`;
+    item.append(title, kind);
+    return item;
+  });
+  const artifactCards = task.artifacts.map((artifact) => {
     const item = document.createElement("div");
     item.className = "artifact";
     const title = document.createElement("strong");
@@ -60,7 +70,8 @@ async function expandRun(card, taskId) {
     kind.textContent = artifact.kind.replaceAll("_", " ");
     item.append(title, kind);
     return item;
-  }));
+  });
+  artifacts.replaceChildren(...jobCards, ...artifactCards);
   detail.hidden = false;
   summary.setAttribute("aria-expanded", "true");
   card.querySelector(".disclosure").textContent = "−";
@@ -78,7 +89,9 @@ function renderTasks(tasks) {
     card.querySelector(".run-summary").addEventListener("click", () => expandRun(card, task.id));
     return fragment;
   }));
-  const hasActiveTask = tasks.some((task) => ["pending", "running"].includes(task.status));
+  const hasActiveTask = tasks.some((task) =>
+    ["pending", "queued", "running", "retrying"].includes(task.status)
+  );
   clearTimeout(refreshTimer);
   if (hasActiveTask) refreshTimer = setTimeout(loadTasks, 1200);
 }
@@ -115,4 +128,3 @@ taskForm.addEventListener("submit", async (event) => {
 
 refreshButton.addEventListener("click", loadTasks);
 loadTasks();
-
