@@ -1,0 +1,413 @@
+"""Durable workflow engine for repository-level agent tasks.
+
+The engine coordinates already-bounded components. Provider I/O, patch policy, repository
+inspection, and test execution remain behind separate interfaces so their authority is explicit.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from time import monotonic
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy.orm import Session
+
+from devpilot.domain import ArtifactKind, EventKind, RunStep, TaskStatus
+from devpilot.errors import (
+    BudgetExceededError,
+    InvalidTaskStateError,
+    RetryableStepError,
+    RuntimeErrorBase,
+)
+from devpilot.executions import StepExecutions
+from devpilot.indexing import RepositoryIndexer
+from devpilot.modeling import AgentContext, ModelProvider
+from devpilot.patching import WorkspaceManager
+from devpilot.repository import TaskRepository
+from devpilot.retrieval import HybridCodeRetriever
+from devpilot.runtime.model_calls import ModelCallController
+from devpilot.runtime.state import RunState
+from devpilot.tools import LocalTestRunner, RepositoryInspector
+
+
+class AgentRuntime:
+    """Execute, checkpoint, resume, and audit the fixed repository workflow."""
+
+    STEPS = list(RunStep)
+
+    def __init__(
+        self,
+        session: Session,
+        provider: ModelProvider,
+        inspector: RepositoryInspector,
+        test_runner: LocalTestRunner,
+        indexer: RepositoryIndexer,
+        workspace_manager: WorkspaceManager,
+        context_token_budget: int,
+        heartbeat: Callable[[], None] | None = None,
+    ) -> None:
+        self.tasks = TaskRepository(session)
+        self.executions = StepExecutions(session)
+        self.session = session
+        self.provider = provider
+        self.inspector = inspector
+        self.test_runner = test_runner
+        self.indexer = indexer
+        self.workspace_manager = workspace_manager
+        self.context_token_budget = context_token_budget
+        self.heartbeat = heartbeat
+        self.model_calls = ModelCallController(self.tasks, provider, heartbeat)
+        self.handlers: dict[RunStep, Callable[[RunState], str]] = {
+            RunStep.VALIDATE: self._validate,
+            RunStep.INSPECT_REPOSITORY: self._inspect_repository,
+            RunStep.RETRIEVE_CONTEXT: self._retrieve_context,
+            RunStep.BUILD_PLAN: self._build_plan,
+            RunStep.PROPOSE_CHANGE: self._propose_change,
+            RunStep.VALIDATE_PATCH: self._validate_patch,
+            RunStep.RUN_TESTS: self._run_tests,
+            RunStep.REVIEW: self._review,
+            RunStep.FINALIZE: self._finalize,
+        }
+
+    def run(self, task_id: UUID) -> None:
+        """Run a new task or continue immediately after its latest checkpoint."""
+
+        task = self.tasks.get(task_id)
+        if task.status in {TaskStatus.RUNNING, TaskStatus.COMPLETED, TaskStatus.CANCELLED}:
+            raise InvalidTaskStateError(f"Task cannot run from state {task.status.value}")
+
+        checkpoint = self.tasks.latest_checkpoint(task_id)
+        if checkpoint:
+            state = RunState.restore(checkpoint.state)
+            start_index = checkpoint.step_index + 1
+        else:
+            state = RunState(
+                task_id=task_id,
+                requirement=task.requirement,
+                repository_path=task.repository_path,
+            )
+            start_index = 0
+
+        if len(self.STEPS) > task.budget.max_steps:
+            raise BudgetExceededError("Task step budget is smaller than the workflow")
+
+        started = monotonic()
+        self.tasks.set_status(task_id, TaskStatus.RUNNING)
+        self.tasks.append_event(
+            task_id,
+            EventKind.TASK_STARTED,
+            "Runtime started the task.",
+            payload={"resume_from": start_index, "provider": self.provider.name},
+        )
+        self.tasks.commit()
+
+        try:
+            for index in range(start_index, len(self.STEPS)):
+                step = self.STEPS[index]
+                self.session.expire_all()
+                current = self.tasks.get(task_id)
+                if current.status == TaskStatus.CANCELLED:
+                    self._cleanup_workspace(state)
+                    return
+                if monotonic() - started > task.budget.max_wall_seconds:
+                    raise BudgetExceededError("Task wall-clock budget exceeded")
+                self._run_step(index, step, state, task.budget.max_retries_per_step)
+        except Exception as exc:
+            self.session.expire_all()
+            if self.tasks.get(task_id).status == TaskStatus.CANCELLED:
+                self._cleanup_workspace(state)
+                return
+            self._cleanup_workspace(state)
+            self.tasks.set_status(
+                task_id,
+                TaskStatus.FAILED,
+                error_message=f"{type(exc).__name__}: {exc}",
+            )
+            self.tasks.append_event(
+                task_id,
+                EventKind.TASK_FAILED,
+                "Runtime stopped after a failed step.",
+                payload={"error_type": type(exc).__name__, "error": str(exc)},
+            )
+            self.tasks.commit()
+            raise
+
+    def _run_step(
+        self,
+        index: int,
+        step: RunStep,
+        state: RunState,
+        max_retries: int,
+    ) -> None:
+        # A completed idempotency record wins over a stale checkpoint after process recovery.
+        existing = self.executions.get(state.task_id, step)
+        if existing is not None and existing.status == "completed" and existing.result:
+            saved_state = existing.result.get("state")
+            if isinstance(saved_state, dict):
+                self._restore_into(state, saved_state)
+            return
+
+        self.tasks.set_status(state.task_id, TaskStatus.RUNNING, current_step=step)
+        for retry_index in range(max_retries + 1):
+            execution = self.executions.begin(state.task_id, step)
+            event_kind = EventKind.STEP_STARTED if retry_index == 0 else EventKind.STEP_RETRYING
+            self.tasks.append_event(
+                state.task_id,
+                event_kind,
+                (
+                    f"Started {step.value}."
+                    if retry_index == 0
+                    else f"Retrying {step.value} after a transient failure."
+                ),
+                step=step,
+                payload={"attempt": execution.attempt},
+            )
+            self.tasks.commit()
+            try:
+                summary = self.handlers[step](state)
+            except Exception as exc:
+                self.session.rollback()
+                failed_execution = self.executions.get(state.task_id, step)
+                if failed_execution is None:
+                    raise RuntimeErrorBase("Step execution record disappeared") from exc
+                self.executions.fail(failed_execution, f"{type(exc).__name__}: {exc}")
+                self.tasks.append_event(
+                    state.task_id,
+                    EventKind.STEP_FAILED,
+                    f"{step.value} failed.",
+                    step=step,
+                    payload={
+                        "attempt": failed_execution.attempt,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "retryable": isinstance(exc, RetryableStepError),
+                    },
+                )
+                self.tasks.commit()
+                if isinstance(exc, RetryableStepError) and retry_index < max_retries:
+                    continue
+                raise
+
+            # State, execution result, artifacts, and completion event share one commit boundary.
+            checkpoint_state = state.checkpoint()
+            self.tasks.save_checkpoint(state.task_id, index, step, checkpoint_state)
+            self.executions.complete(
+                execution,
+                {"summary": summary, "state": checkpoint_state},
+            )
+            self.tasks.append_event(
+                state.task_id,
+                EventKind.STEP_COMPLETED,
+                summary,
+                step=step,
+                payload={"attempt": execution.attempt},
+            )
+            self.tasks.commit()
+            if self.heartbeat is not None:
+                self.heartbeat()
+            return
+
+    def _validate(self, state: RunState) -> str:
+        if len(state.requirement.strip()) < 10:
+            raise ValueError("Requirement is too short to produce an auditable plan")
+        return "Requirement passed structural validation."
+
+    def _inspect_repository(self, state: RunState) -> str:
+        state.repository = self.inspector.inspect(state.repository_path)
+        self.tasks.add_artifact(
+            state.task_id,
+            ArtifactKind.REPOSITORY_SNAPSHOT,
+            "Repository snapshot",
+            state.repository,
+        )
+        return f"Indexed repository metadata for {state.repository['file_count']} files."
+
+    def _retrieve_context(self, state: RunState) -> str:
+        if state.repository is None:
+            raise RuntimeErrorBase("Repository evidence is missing")
+        chunks = self.indexer.index(state.repository)
+        retriever = HybridCodeRetriever(chunks)
+        state.code_context = retriever.build_context(
+            state.requirement,
+            token_budget=self.context_token_budget,
+        )
+        self.tasks.add_artifact(
+            state.task_id,
+            ArtifactKind.CODE_CONTEXT,
+            "Repository-aware code context",
+            state.code_context,
+        )
+        return (
+            f"Selected {state.code_context['selected_count']} code chunks "
+            f"from {state.code_context['candidate_count']} candidates."
+        )
+
+    def _build_plan(self, state: RunState) -> str:
+        state.plan = self.model_calls.invoke(
+            state.task_id,
+            RunStep.BUILD_PLAN,
+            "planner",
+            lambda: self.provider.build_plan(self._context(state)),
+        )
+        self.tasks.add_artifact(
+            state.task_id,
+            ArtifactKind.IMPLEMENTATION_PLAN,
+            "Implementation plan",
+            state.plan,
+        )
+        return f"Built a plan with {len(state.plan.get('steps', []))} steps."
+
+    def _propose_change(self, state: RunState) -> str:
+        state.proposal = self.model_calls.invoke(
+            state.task_id,
+            RunStep.PROPOSE_CHANGE,
+            "implementer",
+            lambda: self.provider.propose_change(self._context(state)),
+        )
+        self.tasks.add_artifact(
+            state.task_id,
+            ArtifactKind.CHANGE_PROPOSAL,
+            "Change proposal",
+            state.proposal,
+        )
+        return "Recorded a structured change proposal."
+
+    def _validate_patch(self, state: RunState) -> str:
+        patch = (state.proposal or {}).get("patch")
+        if not isinstance(patch, str) or not patch.strip():
+            report: dict[str, Any] = {
+                "status": "skipped",
+                "reason": "The selected provider did not propose a patch.",
+                "workspace_root": None,
+                "source_unchanged": True,
+            }
+        else:
+            if state.repository is None:
+                raise RuntimeErrorBase("Repository evidence is missing")
+            report = self.workspace_manager.apply(
+                state.task_id,
+                str(state.repository["root"]),
+                patch,
+            )
+            state.workspace_root = str(report["workspace_root"])
+        state.patch_validation = report
+        self.tasks.add_artifact(
+            state.task_id,
+            ArtifactKind.PATCH_VALIDATION,
+            "Patch safety validation",
+            report,
+        )
+        return f"Patch safety stage finished with status {report['status']}."
+
+    def _run_tests(self, state: RunState) -> str:
+        if state.repository is None:
+            raise RuntimeErrorBase("Repository evidence is missing")
+        root = self._ensure_workspace(state)
+        state.test_report = self.test_runner.run(root)
+        self.tasks.add_artifact(
+            state.task_id,
+            ArtifactKind.TEST_REPORT,
+            "Test report",
+            state.test_report,
+        )
+        return f"Test stage finished with status {state.test_report['status']}."
+
+    def _review(self, state: RunState) -> str:
+        state.review = self.model_calls.invoke(
+            state.task_id,
+            RunStep.REVIEW,
+            "reviewer",
+            lambda: self.provider.review(self._context(state)),
+        )
+        self.tasks.add_artifact(
+            state.task_id,
+            ArtifactKind.REVIEW_REPORT,
+            "Independent review",
+            state.review,
+        )
+        return f"Review decision: {state.review['decision']}."
+
+    def _finalize(self, state: RunState) -> str:
+        workspace_was_created = state.workspace_root is not None
+        self._cleanup_workspace(state)
+        result = {
+            "outcome": ("staged_patch_verified" if workspace_was_created else "dry_run_completed"),
+            "provider": self.provider.name,
+            "repository_digest": (state.repository or {}).get("tree_digest"),
+            "test_status": (state.test_report or {}).get("status"),
+            "review_decision": (state.review or {}).get("decision"),
+            "patch_status": (state.patch_validation or {}).get("status"),
+            "model_calls": self.model_calls.count(state.task_id),
+            "workspace_cleaned": True,
+        }
+        self.tasks.add_artifact(
+            state.task_id,
+            ArtifactKind.FINAL_REPORT,
+            "Final report",
+            result,
+        )
+        self.tasks.set_status(
+            state.task_id,
+            TaskStatus.COMPLETED,
+            result_summary=(
+                "Run completed with a traceable plan, policy-gated patch stage, tests, and review."
+            ),
+        )
+        self.tasks.append_event(
+            state.task_id,
+            EventKind.TASK_COMPLETED,
+            "Task completed successfully.",
+            payload=result,
+        )
+        return "Final report persisted."
+
+    @staticmethod
+    def _context(state: RunState) -> AgentContext:
+        return AgentContext(
+            requirement=state.requirement,
+            repository=state.repository or {},
+            code_context=state.code_context,
+            plan=state.plan,
+            proposal=state.proposal,
+            patch_validation=state.patch_validation,
+            test_report=state.test_report,
+        )
+
+    @staticmethod
+    def _restore_into(state: RunState, payload: dict[str, Any]) -> None:
+        restored = RunState.restore(payload)
+        state.started_at = restored.started_at
+        state.repository = restored.repository
+        state.code_context = restored.code_context
+        state.plan = restored.plan
+        state.proposal = restored.proposal
+        state.patch_validation = restored.patch_validation
+        state.workspace_root = restored.workspace_root
+        state.test_report = restored.test_report
+        state.review = restored.review
+
+    def _ensure_workspace(self, state: RunState) -> str:
+        if state.repository is None:
+            raise RuntimeErrorBase("Repository evidence is missing")
+        patch = (state.proposal or {}).get("patch")
+        if not isinstance(patch, str) or not patch.strip():
+            return str(state.repository["root"])
+        if state.workspace_root is not None:
+            workspace = self.workspace_manager.path_for(state.task_id)
+            if workspace.is_dir():
+                return str(workspace)
+
+        # A disposable workspace may disappear between processes; recreate it from the patch.
+        report = self.workspace_manager.apply(
+            state.task_id,
+            str(state.repository["root"]),
+            patch,
+        )
+        state.workspace_root = str(report["workspace_root"])
+        state.patch_validation = report
+        return state.workspace_root
+
+    def _cleanup_workspace(self, state: RunState) -> None:
+        self.workspace_manager.cleanup(state.task_id)
+        state.workspace_root = None

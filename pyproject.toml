@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "devpilot"
+version = "0.1.0"
+description = "A recoverable agent runtime for repository-level software engineering tasks"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "DevPilot Contributors" }]
+dependencies = [
+  "fastapi>=0.115,<1.0",
+  "openai>=2.8,<3.0",
+  "pydantic-settings>=2.7,<3.0",
+  "sqlalchemy>=2.0,<3.0",
+  "tree-sitter>=0.25.1,<0.26",
+  "tree-sitter-python>=0.25,<1.0",
+  "uvicorn[standard]>=0.34,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<1.0",
+  "mypy>=1.14,<2.0",
+  "pytest>=8.3,<9.0",
+  "pytest-cov>=6.0,<7.0",
+  "ruff>=0.9,<1.0",
+]
+
+[project.scripts]
+devpilot = "devpilot.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/devpilot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
