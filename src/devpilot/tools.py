@@ -1,3 +1,5 @@
+"""Bounded local tools for repository inspection and opt-in test execution."""
+
 from __future__ import annotations
 
 import hashlib

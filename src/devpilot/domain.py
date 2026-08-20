@@ -1,3 +1,5 @@
+"""API-facing enums and Pydantic models shared across application layers."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime

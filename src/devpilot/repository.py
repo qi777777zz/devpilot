@@ -1,3 +1,5 @@
+"""Persistence facade for tasks, events, checkpoints, and artifacts."""
+
 from __future__ import annotations
 
 from typing import Any

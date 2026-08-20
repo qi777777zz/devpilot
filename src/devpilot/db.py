@@ -1,3 +1,5 @@
+"""SQLAlchemy records and database lifecycle for durable runtime state."""
+
 from __future__ import annotations
 
 from collections.abc import Generator

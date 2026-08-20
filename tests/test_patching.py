@@ -10,8 +10,8 @@ from devpilot.db import Database
 from devpilot.domain import TaskCreate
 from devpilot.errors import PatchApplyError, PatchPolicyError
 from devpilot.indexing import RepositoryIndexer
+from devpilot.modeling import AgentContext, DeterministicProvider
 from devpilot.patching import PatchPolicy, WorkspaceManager
-from devpilot.providers import AgentContext, DeterministicProvider
 from devpilot.repository import TaskRepository
 from devpilot.runtime import AgentRuntime
 from devpilot.tools import LocalTestRunner, RepositoryInspector

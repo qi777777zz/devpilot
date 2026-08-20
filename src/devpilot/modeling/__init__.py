@@ -1,22 +1,20 @@
-"""Compatibility imports for the pre-package provider API.
+"""Public model-provider API.
 
-New code should import from :mod:`devpilot.modeling`. This shim keeps existing integrations and
-tests working while the internal directory structure evolves.
+Import from this module unless an adapter-specific type is required.
 """
 
-from devpilot.modeling import (
+from devpilot.modeling.contracts import (
     AgentContext,
     ChangeOutput,
-    DeterministicProvider,
     ModelProvider,
-    OpenAIResponsesClient,
-    OpenAIStructuredProvider,
     PlanOutput,
     ReviewFinding,
     ReviewOutput,
     StructuredResponseClient,
-    build_provider,
 )
+from devpilot.modeling.factory import build_provider
+from devpilot.modeling.offline import DeterministicProvider
+from devpilot.modeling.openai_provider import OpenAIResponsesClient, OpenAIStructuredProvider
 
 __all__ = [
     "AgentContext",

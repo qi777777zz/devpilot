@@ -18,6 +18,11 @@ These records are separate because they have different retention and query needs
 mutable lifecycle state; events are an audit trail; checkpoints are recovery data; artifacts are
 user-facing evidence.
 
+Runtime code is split by change reason: `runtime/state.py` owns checkpoint serialization,
+`runtime/model_calls.py` owns external-call accounting, and `runtime/engine.py` owns workflow
+transitions. Model contracts and adapters live under `modeling/`, so the engine does not depend on
+the OpenAI SDK directly.
+
 ## Initial workflow
 
 ```text

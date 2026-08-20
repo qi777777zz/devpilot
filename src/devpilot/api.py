@@ -1,3 +1,5 @@
+"""FastAPI delivery layer for task commands and the browser console."""
+
 from collections.abc import AsyncIterator, Generator
 from contextlib import asynccontextmanager
 from pathlib import Path

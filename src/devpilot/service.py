@@ -1,3 +1,5 @@
+"""Application services that connect API commands, queue leases, and runtime workers."""
+
 from __future__ import annotations
 
 import os
@@ -13,8 +15,8 @@ from devpilot.config import Settings
 from devpilot.domain import EventKind, TaskStatus
 from devpilot.errors import InvalidTaskStateError, LeaseLostError, RetryableStepError
 from devpilot.indexing import RepositoryIndexer
+from devpilot.modeling import build_provider
 from devpilot.patching import WorkspaceManager
-from devpilot.providers import build_provider
 from devpilot.queue import JobQueue
 from devpilot.repository import TaskRepository
 from devpilot.runtime import AgentRuntime

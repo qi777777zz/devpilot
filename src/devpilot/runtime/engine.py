@@ -1,8 +1,12 @@
+"""Durable workflow engine for repository-level agent tasks.
+
+The engine coordinates already-bounded components. Provider I/O, patch policy, repository
+inspection, and test execution remain behind separate interfaces so their authority is explicit.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from time import monotonic
 from typing import Any
 from uuid import UUID
@@ -18,63 +22,18 @@ from devpilot.errors import (
 )
 from devpilot.executions import StepExecutions
 from devpilot.indexing import RepositoryIndexer
+from devpilot.modeling import AgentContext, ModelProvider
 from devpilot.patching import WorkspaceManager
-from devpilot.providers import AgentContext, ModelProvider
 from devpilot.repository import TaskRepository
 from devpilot.retrieval import HybridCodeRetriever
+from devpilot.runtime.model_calls import ModelCallController
+from devpilot.runtime.state import RunState
 from devpilot.tools import LocalTestRunner, RepositoryInspector
 
 
-@dataclass
-class RunState:
-    task_id: UUID
-    requirement: str
-    repository_path: str
-    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
-    repository: dict[str, Any] | None = None
-    code_context: dict[str, Any] | None = None
-    plan: dict[str, Any] | None = None
-    proposal: dict[str, Any] | None = None
-    patch_validation: dict[str, Any] | None = None
-    workspace_root: str | None = None
-    test_report: dict[str, Any] | None = None
-    review: dict[str, Any] | None = None
-
-    def checkpoint(self) -> dict[str, Any]:
-        return {
-            "task_id": str(self.task_id),
-            "requirement": self.requirement,
-            "repository_path": self.repository_path,
-            "started_at": self.started_at.isoformat(),
-            "repository": self.repository,
-            "code_context": self.code_context,
-            "plan": self.plan,
-            "proposal": self.proposal,
-            "patch_validation": self.patch_validation,
-            "workspace_root": self.workspace_root,
-            "test_report": self.test_report,
-            "review": self.review,
-        }
-
-    @classmethod
-    def restore(cls, payload: dict[str, Any]) -> RunState:
-        return cls(
-            task_id=UUID(str(payload["task_id"])),
-            requirement=str(payload["requirement"]),
-            repository_path=str(payload["repository_path"]),
-            started_at=datetime.fromisoformat(str(payload["started_at"])),
-            repository=payload.get("repository"),
-            code_context=payload.get("code_context"),
-            plan=payload.get("plan"),
-            proposal=payload.get("proposal"),
-            patch_validation=payload.get("patch_validation"),
-            workspace_root=payload.get("workspace_root"),
-            test_report=payload.get("test_report"),
-            review=payload.get("review"),
-        )
-
-
 class AgentRuntime:
+    """Execute, checkpoint, resume, and audit the fixed repository workflow."""
+
     STEPS = list(RunStep)
 
     def __init__(
@@ -98,6 +57,7 @@ class AgentRuntime:
         self.workspace_manager = workspace_manager
         self.context_token_budget = context_token_budget
         self.heartbeat = heartbeat
+        self.model_calls = ModelCallController(self.tasks, provider, heartbeat)
         self.handlers: dict[RunStep, Callable[[RunState], str]] = {
             RunStep.VALIDATE: self._validate,
             RunStep.INSPECT_REPOSITORY: self._inspect_repository,
@@ -111,6 +71,8 @@ class AgentRuntime:
         }
 
     def run(self, task_id: UUID) -> None:
+        """Run a new task or continue immediately after its latest checkpoint."""
+
         task = self.tasks.get(task_id)
         if task.status in {TaskStatus.RUNNING, TaskStatus.COMPLETED, TaskStatus.CANCELLED}:
             raise InvalidTaskStateError(f"Task cannot run from state {task.status.value}")
@@ -178,6 +140,7 @@ class AgentRuntime:
         state: RunState,
         max_retries: int,
     ) -> None:
+        # A completed idempotency record wins over a stale checkpoint after process recovery.
         existing = self.executions.get(state.task_id, step)
         if existing is not None and existing.status == "completed" and existing.result:
             saved_state = existing.result.get("state")
@@ -225,6 +188,8 @@ class AgentRuntime:
                 if isinstance(exc, RetryableStepError) and retry_index < max_retries:
                     continue
                 raise
+
+            # State, execution result, artifacts, and completion event share one commit boundary.
             checkpoint_state = state.checkpoint()
             self.tasks.save_checkpoint(state.task_id, index, step, checkpoint_state)
             self.executions.complete(
@@ -258,21 +223,6 @@ class AgentRuntime:
         )
         return f"Indexed repository metadata for {state.repository['file_count']} files."
 
-    def _build_plan(self, state: RunState) -> str:
-        state.plan = self._invoke_model(
-            state,
-            RunStep.BUILD_PLAN,
-            "planner",
-            lambda: self.provider.build_plan(self._context(state)),
-        )
-        self.tasks.add_artifact(
-            state.task_id,
-            ArtifactKind.IMPLEMENTATION_PLAN,
-            "Implementation plan",
-            state.plan,
-        )
-        return f"Built a plan with {len(state.plan.get('steps', []))} steps."
-
     def _retrieve_context(self, state: RunState) -> str:
         if state.repository is None:
             raise RuntimeErrorBase("Repository evidence is missing")
@@ -293,9 +243,24 @@ class AgentRuntime:
             f"from {state.code_context['candidate_count']} candidates."
         )
 
+    def _build_plan(self, state: RunState) -> str:
+        state.plan = self.model_calls.invoke(
+            state.task_id,
+            RunStep.BUILD_PLAN,
+            "planner",
+            lambda: self.provider.build_plan(self._context(state)),
+        )
+        self.tasks.add_artifact(
+            state.task_id,
+            ArtifactKind.IMPLEMENTATION_PLAN,
+            "Implementation plan",
+            state.plan,
+        )
+        return f"Built a plan with {len(state.plan.get('steps', []))} steps."
+
     def _propose_change(self, state: RunState) -> str:
-        state.proposal = self._invoke_model(
-            state,
+        state.proposal = self.model_calls.invoke(
+            state.task_id,
             RunStep.PROPOSE_CHANGE,
             "implementer",
             lambda: self.provider.propose_change(self._context(state)),
@@ -307,19 +272,6 @@ class AgentRuntime:
             state.proposal,
         )
         return "Recorded a structured change proposal."
-
-    def _run_tests(self, state: RunState) -> str:
-        if state.repository is None:
-            raise RuntimeErrorBase("Repository evidence is missing")
-        root = self._ensure_workspace(state)
-        state.test_report = self.test_runner.run(root)
-        self.tasks.add_artifact(
-            state.task_id,
-            ArtifactKind.TEST_REPORT,
-            "Test report",
-            state.test_report,
-        )
-        return f"Test stage finished with status {state.test_report['status']}."
 
     def _validate_patch(self, state: RunState) -> str:
         patch = (state.proposal or {}).get("patch")
@@ -348,9 +300,22 @@ class AgentRuntime:
         )
         return f"Patch safety stage finished with status {report['status']}."
 
+    def _run_tests(self, state: RunState) -> str:
+        if state.repository is None:
+            raise RuntimeErrorBase("Repository evidence is missing")
+        root = self._ensure_workspace(state)
+        state.test_report = self.test_runner.run(root)
+        self.tasks.add_artifact(
+            state.task_id,
+            ArtifactKind.TEST_REPORT,
+            "Test report",
+            state.test_report,
+        )
+        return f"Test stage finished with status {state.test_report['status']}."
+
     def _review(self, state: RunState) -> str:
-        state.review = self._invoke_model(
-            state,
+        state.review = self.model_calls.invoke(
+            state.task_id,
             RunStep.REVIEW,
             "reviewer",
             lambda: self.provider.review(self._context(state)),
@@ -373,7 +338,7 @@ class AgentRuntime:
             "test_status": (state.test_report or {}).get("status"),
             "review_decision": (state.review or {}).get("decision"),
             "patch_status": (state.patch_validation or {}).get("status"),
-            "model_calls": self.tasks.count_events(state.task_id, EventKind.MODEL_CALL_STARTED),
+            "model_calls": self.model_calls.count(state.task_id),
             "workspace_cleaned": True,
         }
         self.tasks.add_artifact(
@@ -432,6 +397,8 @@ class AgentRuntime:
             workspace = self.workspace_manager.path_for(state.task_id)
             if workspace.is_dir():
                 return str(workspace)
+
+        # A disposable workspace may disappear between processes; recreate it from the patch.
         report = self.workspace_manager.apply(
             state.task_id,
             str(state.repository["root"]),
@@ -444,73 +411,3 @@ class AgentRuntime:
     def _cleanup_workspace(self, state: RunState) -> None:
         self.workspace_manager.cleanup(state.task_id)
         state.workspace_root = None
-
-    def _invoke_model(
-        self,
-        state: RunState,
-        step: RunStep,
-        role: str,
-        call: Callable[[], dict[str, Any]],
-    ) -> dict[str, Any]:
-        if not self.provider.uses_model:
-            return call()
-        task = self.tasks.get(state.task_id)
-        used = self.tasks.count_events(state.task_id, EventKind.MODEL_CALL_STARTED)
-        if used >= task.budget.max_model_calls:
-            raise BudgetExceededError(
-                f"Model call budget exhausted before {role}: {used}/{task.budget.max_model_calls}"
-            )
-        call_number = used + 1
-        metadata = {
-            "role": role,
-            "provider": self.provider.name,
-            "model": self.provider.model,
-            "call_number": call_number,
-            "budget": task.budget.max_model_calls,
-        }
-        self.tasks.append_event(
-            state.task_id,
-            EventKind.MODEL_CALL_STARTED,
-            f"Started structured {role} model call.",
-            step=step,
-            payload=metadata,
-        )
-        self.tasks.commit()
-        if self.heartbeat is not None:
-            self.heartbeat()
-        call_started = monotonic()
-        try:
-            result = call()
-        except Exception as exc:
-            duration_ms = round((monotonic() - call_started) * 1000, 3)
-            self.tasks.append_event(
-                state.task_id,
-                EventKind.MODEL_CALL_FAILED,
-                f"Structured {role} model call failed.",
-                step=step,
-                payload={
-                    **metadata,
-                    "duration_ms": duration_ms,
-                    "error_type": type(exc).__name__,
-                },
-            )
-            self.tasks.commit()
-            raise
-        duration_ms = round((monotonic() - call_started) * 1000, 3)
-        call_metadata = self.provider.call_metadata()
-        allowed_metadata = {
-            key: call_metadata[key]
-            for key in ("request_id", "input_tokens", "output_tokens", "total_tokens")
-            if key in call_metadata
-        }
-        self.tasks.append_event(
-            state.task_id,
-            EventKind.MODEL_CALL_COMPLETED,
-            f"Structured {role} model call completed.",
-            step=step,
-            payload={**metadata, "duration_ms": duration_ms, **allowed_metadata},
-        )
-        self.tasks.commit()
-        if self.heartbeat is not None:
-            self.heartbeat()
-        return result

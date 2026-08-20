@@ -1,3 +1,5 @@
+"""Unified-diff policy enforcement and disposable workspace management."""
+
 from __future__ import annotations
 
 import hashlib
@@ -23,6 +25,8 @@ class PatchManifest:
 
 
 class PatchPolicy:
+    """Reject patch shapes that exceed DevPilot's file authority."""
+
     ALLOWED_SUFFIXES = {
         ".py",
         ".js",
@@ -124,6 +128,8 @@ class PatchPolicy:
 
 
 class WorkspaceManager:
+    """Apply approved text patches to task-scoped repository copies."""
+
     IGNORED_NAMES = {".git", ".venv", "node_modules", "var", "__pycache__", "dist"}
 
     def __init__(self, settings: Settings) -> None:

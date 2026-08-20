@@ -9,8 +9,8 @@ from devpilot.db import Database
 from devpilot.domain import TaskBudget, TaskCreate
 from devpilot.errors import BudgetExceededError, RetryableStepError
 from devpilot.indexing import RepositoryIndexer
+from devpilot.modeling import AgentContext, DeterministicProvider, ModelProvider
 from devpilot.patching import WorkspaceManager
-from devpilot.providers import AgentContext, DeterministicProvider, ModelProvider
 from devpilot.repository import TaskRepository
 from devpilot.runtime import AgentRuntime
 from devpilot.tools import LocalTestRunner, RepositoryInspector, ToolExecutionError

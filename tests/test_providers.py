@@ -9,7 +9,7 @@ from pydantic import SecretStr, ValidationError
 
 from devpilot.config import Settings
 from devpilot.errors import ModelProviderError, RetryableStepError
-from devpilot.providers import (
+from devpilot.modeling import (
     AgentContext,
     ChangeOutput,
     OpenAIResponsesClient,

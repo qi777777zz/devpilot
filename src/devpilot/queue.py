@@ -1,3 +1,5 @@
+"""Database-backed reference queue with compare-and-swap worker leases."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass

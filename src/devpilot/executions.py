@@ -1,3 +1,5 @@
+"""Idempotent step-execution records and attempt transitions."""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime

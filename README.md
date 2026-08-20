@@ -93,8 +93,9 @@ Agent runtime ----> provider contract -> Planner / Implementer / Reviewer
         +----------> opt-in test runner
 ```
 
-Read [the runtime design](docs/architecture/runtime.md) and the
-[architecture decisions](docs/decisions/) for boundaries and trade-offs.
+Read [the code map](docs/development/code-map.md),
+[the runtime design](docs/architecture/runtime.md), and the
+[architecture decisions](docs/decisions/) for navigation, boundaries, and trade-offs.
 
 ## Roadmap
 

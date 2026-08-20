@@ -1,3 +1,5 @@
+"""Tree-sitter repository indexing with content-addressed persistence."""
+
 from __future__ import annotations
 
 import hashlib
